@@ -1,82 +1,76 @@
-from pyspark.shell import spark
+# Continue from your existing code
 from pyspark.sql import SparkSession
-from pyspark.sql.types import IntegerType, DoubleType, StringType, LongType, StructType, StructField
-from util import *
 from datetime import datetime
+from util import flatten_earthquake_data, get_earthquake_schema, fetch_api_data, \
+    fetch_detail_data  # Import the function
 import os
-import requests  # Ensure you import requests if you haven't
 
 if __name__ == '__main__':
-    # Define spark session
+    # Define Spark session
     spark = SparkSession.builder.master("local[*]").appName("Historical Load").getOrCreate()
 
     # API URLs for fetching monthly and daily earthquake data
     monthly_url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson"
+    daily_url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
 
-    # Fetch last month's data using python request lib.
+    # Fetch last month's data
     data_month = fetch_api_data(monthly_url)
-    print("Fetched last month's data:", data_month)
 
-    # Base URL for details
-    base_url = "https://earthquake.usgs.gov/"
-    endpoint_url = "earthquakes/feed/v1.0/detail/"
+    if data_month:
+        print("Successfully fetched last month's earthquake data.")
 
-    # Flatten the data and include the URL for details
-    flattened_data = [
-        {
-            "id": earthquake['id'],
-            "mag": float(earthquake['properties']['mag']) if earthquake['properties']['mag'] is not None else None,
-            "place": earthquake['properties']['place'],
-            "time": earthquake['properties']['time'],
-            "status": earthquake['properties']['status'],
-            "tsunami": earthquake['properties']['tsunami'],
-            "sig": earthquake['properties']['sig'],
-            "longitude": earthquake['geometry']['coordinates'][0],
-            "latitude": earthquake['geometry']['coordinates'][1],
-            "depth": float(earthquake['geometry']['coordinates'][2]) if earthquake['geometry']['coordinates'][
-                                                                            2] is not None else None,
-            "detail_url": f"{base_url}{endpoint_url}{earthquake['id']}.geojson"  # Construct the URL
-        }
-        for earthquake in data_month['features']
-    ]
+        # Flatten the monthly data
+        flattened_data_month = flatten_earthquake_data(data_month)
 
-    # Define the schema
-    schema = StructType([
-        StructField("id", StringType(), True),
-        StructField("mag", DoubleType(), True),
-        StructField("place", StringType(), True),
-        StructField("time", LongType(), True),
-        StructField("status", StringType(), True),
-        StructField("tsunami", IntegerType(), True),
-        StructField("sig", IntegerType(), True),
-        StructField("longitude", DoubleType(), True),
-        StructField("latitude", DoubleType(), True),
-        StructField("depth", DoubleType(), True),
-        StructField("detail_url", StringType(), True)  # New field for the detail URL
-    ])
+        # Create Spark DataFrame for monthly data
+        schema = get_earthquake_schema()
+        data_month_df = spark.createDataFrame(flattened_data_month, schema)
 
-    # Create the Spark DataFrame from the flattened data and schema
-    data_month_df = spark.createDataFrame(flattened_data, schema)
+        # Save the monthly DataFrame as Parquet
+        current_date = datetime.now().strftime("%Y%m%d")
+        target_path_month = f"earthquakeanalysis/raw/{current_date}/earthquake_bronze_data.parquet"
+        os.makedirs(os.path.dirname(target_path_month), exist_ok=True)
+        data_month_df.write.mode("overwrite").parquet(target_path_month)
+        print(f"Monthly data saved to: {target_path_month}")
 
-    # Show the schema of the DataFrame
-    data_month_df.printSchema()
+        # Fetch daily earthquake data
+        data_day = fetch_api_data(daily_url)
 
-    # Show the first 10 rows of the DataFrame
-    data_month_df.show(10, truncate=False)
+        if data_day:
+            print("Successfully fetched daily earthquake data.")
 
-    # Define the target path
-    current_date = datetime.now().strftime("%Y%m%d")
-    target_file = "earthquake_bronze_data"  # Name of the target file
-    target_path = f"earthquakeanalysis/raw/{current_date}/{target_file}.parquet"
+            # Flatten the daily data
+            flattened_data_day = flatten_earthquake_data(data_day)
 
-    # Create the target directory if it does not exist
-    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            # Create Spark DataFrame for daily data
+            data_day_df = spark.createDataFrame(flattened_data_day, schema)
 
-    # Save the DataFrame as Parquet
-    data_month_df.write.mode("overwrite").parquet(target_path)
+            # Save the daily DataFrame as Parquet
+            target_path_day = f"earthquakeanalysis/raw/{current_date}/earthquake_daily_data.parquet"
+            os.makedirs(os.path.dirname(target_path_day), exist_ok=True)
+            data_day_df.write.mode("overwrite").parquet(target_path_day)
+            print(f"Daily data saved to: {target_path_day}")
 
-    # Show a message indicating where the data has been saved
-    print(f"Data saved to: {target_path}")
+            # Extract detail URLs and fetch detailed data
+            for earthquake in flattened_data_day:
+                detail_url = f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/detail/{earthquake['id']}.geojson"
+                detail_data = fetch_detail_data(detail_url)  # Use the imported function
 
-    # Optionally, you can show the first few rows of the DataFrame
-    data_month_df.show(truncate=False)
+                if detail_data:
+                    # Flatten the detail data as needed
+                    flattened_detail_data = flatten_earthquake_data(detail_data)
+
+                    # Create Spark DataFrame for detail data
+                    detail_data_df = spark.createDataFrame(flattened_detail_data, schema)
+
+                    # Save the detail DataFrame as Parquet using the id in the filename
+                    target_path_detail = f"earthquakeanalysis/raw/{current_date}/{earthquake['id']}_detail_data.parquet"
+                    os.makedirs(os.path.dirname(target_path_detail), exist_ok=True)
+                    detail_data_df.write.mode("overwrite").parquet(target_path_detail)
+                    print(f"Detail data for {earthquake['id']} saved to: {target_path_detail}")
+                else:
+                    print(f"Failed to fetch detail data for {earthquake['id']}.")
+        else:
+            print("Failed to fetch daily earthquake data.")
+    else:
+        print("Failed to fetch last month's earthquake data.")
